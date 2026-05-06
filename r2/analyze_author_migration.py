@@ -4,8 +4,9 @@
 Analyze author migration patterns from chinesename_address_year.csv.
 
 Outputs:
-    - author_maps/crosscountry_migration.csv   : authors with addresses in multiple countries
-    - author_maps/incountry_migration.csv      : authors with multiple addresses but only one country
+    - crosscountry_migration.csv               : authors with addresses in multiple countries
+    - incountry_migration.csv                  : authors with multiple addresses but only one country
+    - author_maps/incountry_country_counts.csv : in-country migration author counts by country
     - author_maps/crosscountry_arc_map.html    : world map with arced migration flows
     - author_maps/crosscountry_sankey.html     : Sankey diagram of origin-destination flows
     - author_maps/incountry_migration_map.html : world map showing in-country migration author counts by country
@@ -221,7 +222,7 @@ def build_crosscountry_flows(df: pd.DataFrame) -> Counter[tuple[str, str]]:
 def save_crosscountry_arc_map(
     flows: Counter[tuple[str, str]],
     output_dir: Path,
-    min_flow: int = 1,
+    min_flow: int = 5,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / "crosscountry_arc_map.html"
@@ -260,26 +261,48 @@ def save_crosscountry_arc_map(
             )
         )
 
+    def build_arc_points(
+        lon0: float,
+        lat0: float,
+        lon1: float,
+        lat1: float,
+        samples: int = 32,
+    ) -> tuple[list[float], list[float]]:
+        # Use a quadratic Bezier curve for a smooth migration arc.
+        mid_lon = (lon0 + lon1) / 2
+        mid_lat = (lat0 + lat1) / 2
+        dist = math.sqrt((lon1 - lon0) ** 2 + (lat1 - lat0) ** 2)
+        lift = min(dist * 0.35, 35)
+        control_lat = mid_lat + lift if mid_lat >= 0 else mid_lat - lift
+        control_lon = mid_lon
+
+        curve_lons: list[float] = []
+        curve_lats: list[float] = []
+        for i in range(samples):
+            t = i / (samples - 1)
+            omt = 1 - t
+            lon = omt * omt * lon0 + 2 * omt * t * control_lon + t * t * lon1
+            lat = omt * omt * lat0 + 2 * omt * t * control_lat + t * t * lat1
+            curve_lons.append(lon)
+            curve_lats.append(lat)
+        return curve_lons, curve_lats
+
+    def arrow_symbol_for_segment(dx: float, dy: float) -> str:
+        if abs(dx) >= abs(dy):
+            return "triangle-right" if dx >= 0 else "triangle-left"
+        return "triangle-up" if dy >= 0 else "triangle-down"
+
     for (origin, dest), count in sorted(filtered.items(), key=lambda x: x[1]):
         if origin not in COUNTRY_COORDS or dest not in COUNTRY_COORDS:
             continue
 
         lon0, lat0 = COUNTRY_COORDS[origin]
         lon1, lat1 = COUNTRY_COORDS[dest]
-        mid_lon = (lon0 + lon1) / 2
-        mid_lat = (lat0 + lat1) / 2
-        dist = math.sqrt((lon1 - lon0) ** 2 + (lat1 - lat0) ** 2)
-        lift = min(dist * 0.35, 35)
-        if mid_lat >= 0:
-            mid_lat += lift
-        else:
-            mid_lat -= lift
-
-        line_lons = [lon0, mid_lon, lon1]
-        line_lats = [lat0, mid_lat, lat1]
+        line_lons, line_lats = build_arc_points(lon0, lat0, lon1, lat1)
 
         width = 1 + (count / max_flow) * 5
         opacity = 0.3 + (count / max_flow) * 0.5
+        hover_label = f"Path: {origin} → {dest}<br>People: {count}"
 
         fig.add_trace(
             go.Scattergeo(
@@ -287,8 +310,35 @@ def save_crosscountry_arc_map(
                 lat=line_lats,
                 mode="lines",
                 line=dict(width=width, color=f"rgba(200, 50, 50, {opacity})"),
-                name=f"{origin} → {dest} ({count})",
-                hoverinfo="name",
+                name=f"{origin} → {dest}",
+                text=[hover_label] * len(line_lons),
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+        # Add a direction marker near the destination to indicate movement direction.
+        arrow_start_lon = line_lons[-2]
+        arrow_start_lat = line_lats[-2]
+        arrow_end_lon = line_lons[-1]
+        arrow_end_lat = line_lats[-1]
+        arrow_symbol = arrow_symbol_for_segment(
+            arrow_end_lon - arrow_start_lon,
+            arrow_end_lat - arrow_start_lat,
+        )
+
+        fig.add_trace(
+            go.Scattergeo(
+                lon=[arrow_end_lon],
+                lat=[arrow_end_lat],
+                mode="markers",
+                marker=dict(
+                    size=max(8, min(16, int(6 + width * 1.2))),
+                    color=f"rgba(200, 50, 50, {min(opacity + 0.15, 1.0)})",
+                    symbol=arrow_symbol,
+                ),
+                text=[hover_label],
+                hovertemplate="%{text}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -364,6 +414,30 @@ def save_crosscountry_sankey(
 
     fig.write_html(str(html_path), include_plotlyjs="cdn", full_html=True)
     return html_path
+
+
+def save_crosscountry_flow_counts_csv(
+    flows: Counter[tuple[str, str]],
+    output_dir: Path,
+) -> tuple[Path, pd.DataFrame]:
+    """Save origin->destination flow counts to CSV."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "crosscountry_flow_counts.csv"
+
+    flow_rows = [
+        {"origin": origin, "destination": dest, "people_count": count}
+        for (origin, dest), count in flows.items()
+    ]
+    frame = pd.DataFrame(flow_rows)
+    if frame.empty:
+        frame = pd.DataFrame(columns=["origin", "destination", "people_count"])
+    else:
+        frame = frame.sort_values(
+            ["people_count", "origin", "destination"], ascending=[False, True, True]
+        )
+
+    frame.to_csv(path, index=False, encoding="utf-8-sig")
+    return path, frame
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +562,14 @@ def build_incountry_country_counts(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["people_count", "country"], ascending=[False, True])
     )
     return counts
+
+
+def save_incountry_country_counts_csv(counts: pd.DataFrame, output_dir: Path) -> Path:
+    """Save map source data: in-country migration author counts by country."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "incountry_country_counts.csv"
+    counts.to_csv(path, index=False, encoding="utf-8-sig")
+    return path
 
 
 def save_incountry_map(
@@ -618,36 +700,37 @@ def save_incountry_map(
 
 def main() -> None:
     input_path = BASE_DIR / DEFAULT_INPUT_FILE
+    output_root = BASE_DIR
     output_dir = BASE_DIR / DEFAULT_OUTPUT_DIR
     df = load_data(input_path)
 
     # ---- Cross-country migration ----
-    cross_path, cross_authors, cross_frame = save_crosscountry_csv(df, output_dir)
+    cross_path, cross_authors, cross_frame = save_crosscountry_csv(df, output_root)
     print(f"Cross-country CSV written to {cross_path}", flush=True)
     print(f"Cross-country distinct authors: {cross_authors}", flush=True)
 
     cross_flows = build_crosscountry_flows(cross_frame)
     print(f"Extracted {len(cross_flows)} unique origin→destination flows.", flush=True)
 
-    print("Top 10 cross-country flows:", flush=True)
-    for (origin, dest), count in cross_flows.most_common(10):
-        print(f"  {origin} → {dest}: {count}", flush=True)
-
-    arc_path = save_crosscountry_arc_map(cross_flows, output_dir, min_flow=1)
+    arc_path = save_crosscountry_arc_map(cross_flows, output_dir, min_flow=5)
     print(f"Cross-country arc map saved to {arc_path}", flush=True)
 
     sankey_path = save_crosscountry_sankey(cross_flows, output_dir, min_flow=1)
     print(f"Cross-country Sankey diagram saved to {sankey_path}", flush=True)
 
+    flow_counts_path, flow_counts_df = save_crosscountry_flow_counts_csv(cross_flows, output_dir)
+    print(f"Cross-country flow counts CSV written to {flow_counts_path}", flush=True)
+
     # ---- In-country migration ----
-    incountry_path, incountry_authors = save_incountry_csv(df, output_dir)
+    incountry_path, incountry_authors = save_incountry_csv(df, output_root)
     print(f"In-country CSV written to {incountry_path}", flush=True)
     print(f"In-country distinct authors: {incountry_authors}", flush=True)
 
     # ---- In-country map ----
     incountry_df = build_incountry_records(df)
     incountry_counts = build_incountry_country_counts(incountry_df)
-    print(f"Rendering in-country migration map...", flush=True)
+    incountry_counts_path = save_incountry_country_counts_csv(incountry_counts, output_dir)
+    print(f"In-country country counts CSV written to {incountry_counts_path}", flush=True)
     html_path, image_path = save_incountry_map(
         incountry_counts,
         output_dir,
@@ -660,6 +743,17 @@ def main() -> None:
     )
     if image_path is not None:
         print(f"In-country static image -> {image_path}", flush=True)
+
+    print("Top 10 cross-country flows (final):", flush=True)
+    top_10 = flow_counts_df.head(10)
+    if top_10.empty:
+        print("  No cross-country flows found.", flush=True)
+    else:
+        for _, row in top_10.iterrows():
+            print(
+                f"  {row['origin']} → {row['destination']}: {int(row['people_count'])}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
