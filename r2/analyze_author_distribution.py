@@ -177,6 +177,22 @@ def build_discrete_color_bins(counts: pd.DataFrame) -> pd.DataFrame:
     return binned
 
 
+def build_fixed_color_bins(counts: pd.DataFrame, bins: list[int], labels: list[str]) -> pd.DataFrame:
+    if counts.empty:
+        return counts.assign(color_bin=pd.Series(dtype="object"))
+
+    binned = counts.copy()
+    positive = binned[binned["people_count"] > 0].copy()
+    if positive.empty:
+        binned["color_bin"] = pd.NA
+        return binned
+
+    categories = pd.cut(positive["people_count"], bins=bins, labels=labels, include_lowest=True)
+    binned["color_bin"] = pd.NA
+    binned.loc[positive.index, "color_bin"] = categories.astype("object")
+    return binned
+
+
 def export_static_image(figure: go.Figure, image_path: Path) -> None:
     try:
         figure.write_image(
@@ -208,7 +224,35 @@ def save_year_map(
     image_path = output_dir / f"author_distribution_{year}.{image_format}"
     label_font_size = 10
 
-    binned = build_discrete_color_bins(counts)
+    if year == 2010:
+        binned = build_fixed_color_bins(
+            counts,
+            bins=[0, 10, 20, 155],
+            labels=["1-10", "11-20", "21-155"],
+        )
+    elif year == 2020:
+        # Fixed bins for 2020: 1-20, 21-40, 41-571
+        binned = build_fixed_color_bins(
+            counts,
+            bins=[0, 20, 40, 571],
+            labels=["1-20", "21-40", "41-571"],
+        )
+    elif year == 2024:
+        # Fixed bins for 2024: 1-20, 21-50, 51+
+        if counts.empty or counts['people_count'].dropna().empty:
+            max_val = 51
+        else:
+            max_val = int(counts['people_count'].max())
+            if max_val < 51:
+                max_val = 51
+
+        binned = build_fixed_color_bins(
+            counts,
+            bins=[0, 20, 50, max_val],
+            labels=["1-20", "21-50", "51-1041"],
+        )
+    else:
+        binned = build_discrete_color_bins(counts)
     positive = binned[binned["people_count"] > 0].copy()
 
     figure = go.Figure()
