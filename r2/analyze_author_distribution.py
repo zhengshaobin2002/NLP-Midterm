@@ -10,8 +10,8 @@ import plotly.express as px
 
 
 TARGET_YEARS = [1991, 2000, 2010, 2020, 2024]
-DEFAULT_INPUT_FILE = "chinesename_address_year.csv"
-DEFAULT_OUTPUT_DIR = "author_maps"
+DEFAULT_INPUT_FILE = "r2/chinesename_address_year.csv"
+DEFAULT_OUTPUT_DIR = "r2/maps"
 
 US_STATE_CODES = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
