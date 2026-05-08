@@ -7,10 +7,10 @@ using unique_authors.csv as the name filter.
 Input files:
   - r1/csv/unique_authors.csv    : one author name per line
   - r2/names_address_year.csv    : actually an xlsx with columns:
-                                   Author Full Names, Addresses, Publication Year
+                                   Author Full Names, Addresses, Publication Year, Article Title
 
 Output file:
-  - r2/chinesename_address_year.csv  : columns name, address, year
+  - r2/chinesename_address_year.csv  : columns name, address, year, Article Title
 
 Address parsing rules:
   - Addresses are separated by semicolons, but semicolons inside [...] brackets
@@ -105,6 +105,7 @@ def main() -> None:
         authors_raw = str(row.get("Author Full Names", "")).strip()
         addresses_raw = str(row.get("Addresses", "")).strip()
         year = row.get("Publication Year")
+        article_title = str(row.get("Article Title", "")).strip()
 
         if not authors_raw or not addresses_raw or pd.isna(year):
             continue
@@ -130,15 +131,15 @@ def main() -> None:
                 # explicit mapping: only the names inside the brackets get this address
                 matched = [n for n in bracket_names if n in unique_authors]
                 for name in matched:
-                    records.append({"name": name, "address": address, "year": int(year)})
+                    records.append({"name": name, "address": address, "year": int(year), "Article Title": article_title})
             else:
                 # no bracket prefix: all relevant authors on this row get this address
                 for name in relevant_authors:
-                    records.append({"name": name, "address": address, "year": int(year)})
+                    records.append({"name": name, "address": address, "year": int(year), "Article Title": article_title})
 
     # ---- deduplicate ----
-    out_df = pd.DataFrame(records).drop_duplicates(subset=["name", "address", "year"])
-    print(f"Extracted {len(out_df):,} unique name-address-year records.")
+    out_df = pd.DataFrame(records).drop_duplicates(subset=["name", "address", "year", "Article Title"])
+    print(f"Extracted {len(out_df):,} unique name-address-year-article-title records.")
 
     # ---- write output ----
     out_df.to_csv(output_path, index=False, encoding="utf-8-sig")

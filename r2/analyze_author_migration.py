@@ -34,7 +34,7 @@ US_STATE_CODES = {
     "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
     "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
     "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
-    "DC",
+    "DC", "PR"
 }
 
 STATIC_IMAGE_FORMAT = "png"
@@ -136,6 +136,9 @@ def extract_country(address: str) -> str | None:
 
     if last_normalized in COUNTRY_ALIASES:
         return COUNTRY_ALIASES[last_normalized]
+
+    if last_normalized.startswith("PR ") or last_normalized == "PUERTO RICO":
+        return "United States"
 
     if last_normalized.startswith("SINGAPORE"):
         return "Singapore"

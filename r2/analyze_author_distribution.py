@@ -94,7 +94,7 @@ def extract_country(address: str) -> str | None:
 
 def load_data(input_file: Path) -> pd.DataFrame:
     df = pd.read_csv(input_file, encoding="utf-8-sig")
-    required_columns = {"name", "address", "year"}
+    required_columns = {"name", "address", "year", "Article Title"}
     missing = required_columns - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns in input file: {sorted(missing)}")
@@ -102,8 +102,9 @@ def load_data(input_file: Path) -> pd.DataFrame:
     df = df.copy()
     df["name"] = df["name"].astype(str).str.strip()
     df["address"] = df["address"].astype(str).str.strip()
+    df["Article Title"] = df["Article Title"].astype(str).str.strip()
     df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
-    df = df.dropna(subset=["name", "address", "year"])
+    df = df.dropna(subset=["name", "address", "year", "Article Title"])
     return df
 
 
@@ -119,24 +120,31 @@ def print_name_address_summary(df: pd.DataFrame) -> None:
             print(f"  {name}: {count} addresses")
 
 
-def build_yearly_country_counts(df: pd.DataFrame, years: list[int]) -> dict[int, pd.DataFrame]:
+def build_yearly_country_counts(
+    df: pd.DataFrame,
+    years: list[int],
+    count_col: str,
+    output_col: str,
+    dedup_cols: list[str] | None = None,
+) -> dict[int, pd.DataFrame]:
     results: dict[int, pd.DataFrame] = {}
 
     for year in years:
         year_frame = df[df["year"] == year].copy()
         if year_frame.empty:
-            results[year] = pd.DataFrame(columns=["country", "people_count"])
+            results[year] = pd.DataFrame(columns=["country", output_col])
             continue
 
         year_frame["country"] = year_frame["address"].map(extract_country)
         year_frame = year_frame.dropna(subset=["country"])
-        year_frame = year_frame.drop_duplicates(subset=["name", "country"])
+        if dedup_cols:
+            year_frame = year_frame.drop_duplicates(subset=dedup_cols)
 
         counts = (
-            year_frame.groupby("country")["name"]
+            year_frame.groupby("country")[count_col]
             .nunique()
-            .reset_index(name="people_count")
-            .sort_values(["people_count", "country"], ascending=[False, True])
+            .reset_index(name=output_col)
+            .sort_values([output_col, "country"], ascending=[False, True])
         )
         results[year] = counts
 
@@ -155,39 +163,44 @@ def format_count_range(interval: pd.Interval) -> str:
     return f"{lower}-{upper}"
 
 
-def build_discrete_color_bins(counts: pd.DataFrame) -> pd.DataFrame:
+def build_discrete_color_bins(counts: pd.DataFrame, count_col: str = "people_count") -> pd.DataFrame:
     if counts.empty:
         return counts.assign(color_bin=pd.Series(dtype="object"))
 
     binned = counts.copy()
-    positive = binned[binned["people_count"] > 0].copy()
+    positive = binned[binned[count_col] > 0].copy()
     if positive.empty:
         binned["color_bin"] = pd.NA
         return binned
 
-    bin_count = min(5, positive["people_count"].nunique())
+    bin_count = min(5, positive[count_col].nunique())
     if bin_count <= 1:
-        binned["color_bin"] = f"{int(positive['people_count'].iloc[0])}"
+        binned["color_bin"] = f"{int(positive[count_col].iloc[0])}"
         return binned
 
-    categories = pd.qcut(positive["people_count"], q=bin_count, duplicates="drop")
+    categories = pd.qcut(positive[count_col], q=bin_count, duplicates="drop")
     label_map = {interval: format_count_range(interval) for interval in categories.cat.categories}
     binned["color_bin"] = pd.NA
     binned.loc[positive.index, "color_bin"] = categories.map(label_map)
     return binned
 
 
-def build_fixed_color_bins(counts: pd.DataFrame, bins: list[int], labels: list[str]) -> pd.DataFrame:
+def build_fixed_color_bins(
+    counts: pd.DataFrame,
+    bins: list[int],
+    labels: list[str],
+    count_col: str = "people_count",
+) -> pd.DataFrame:
     if counts.empty:
         return counts.assign(color_bin=pd.Series(dtype="object"))
 
     binned = counts.copy()
-    positive = binned[binned["people_count"] > 0].copy()
+    positive = binned[binned[count_col] > 0].copy()
     if positive.empty:
         binned["color_bin"] = pd.NA
         return binned
 
-    categories = pd.cut(positive["people_count"], bins=bins, labels=labels, include_lowest=True)
+    categories = pd.cut(positive[count_col], bins=bins, labels=labels, include_lowest=True)
     binned["color_bin"] = pd.NA
     binned.loc[positive.index, "color_bin"] = categories.astype("object")
     return binned
@@ -218,47 +231,78 @@ def save_year_map(
     output_dir: Path,
     image_format: str,
     export_image: bool,
+    count_col: str = "people_count",
+    value_label: str = "People",
+    title_prefix: str = "Author distribution",
+    filename_prefix: str = "author_distribution",
 ) -> tuple[Path, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    html_path = output_dir / f"author_distribution_{year}.html"
-    image_path = output_dir / f"author_distribution_{year}.{image_format}"
+    html_path = output_dir / f"{filename_prefix}_{year}.html"
+    image_path = output_dir / f"{filename_prefix}_{year}.{image_format}"
     label_font_size = 10
 
-    if year == 2010:
-        binned = build_fixed_color_bins(
-            counts,
-            bins=[0, 10, 20, 155],
-            labels=["1-10", "11-20", "21-155"],
-        )
-    elif year == 2020:
-        # Fixed bins for 2020: 1-20, 21-40, 41-571
-        binned = build_fixed_color_bins(
-            counts,
-            bins=[0, 20, 40, 571],
-            labels=["1-20", "21-40", "41-571"],
-        )
-    elif year == 2024:
-        # Fixed bins for 2024: 1-20, 21-50, 51+
-        if counts.empty or counts['people_count'].dropna().empty:
-            max_val = 51
-        else:
-            max_val = int(counts['people_count'].max())
-            if max_val < 51:
+    if count_col == "people_count":
+        if year == 2010:
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 10, 20, 155],
+                labels=["1-10", "11-20", "21-155"],
+                count_col=count_col,
+            )
+        elif year == 2020:
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 20, 50, 571],
+                labels=["1-20", "21-50", "51-571"],
+                count_col=count_col,
+            )
+        elif year == 2024:
+            if counts.empty or counts[count_col].dropna().empty:
                 max_val = 51
+            else:
+                max_val = int(counts[count_col].max())
+                if max_val < 51:
+                    max_val = 51
 
-        binned = build_fixed_color_bins(
-            counts,
-            bins=[0, 20, 50, max_val],
-            labels=["1-20", "21-50", "51-1041"],
-        )
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 20, 50, max_val],
+                labels=["1-20", "21-50", "51-1041"],
+                count_col=count_col,
+            )
+        else:
+            binned = build_discrete_color_bins(counts, count_col=count_col)
     else:
-        binned = build_discrete_color_bins(counts)
-    positive = binned[binned["people_count"] > 0].copy()
+        if year == 2010:
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 10, 20, 159],
+                labels=["1-10", "11-20", "21-159"],
+                count_col=count_col,
+            )
+        elif year == 2020:
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 20, 50, 527],
+                labels=["1-20", "21-50", "51-527"],
+                count_col=count_col,
+            )
+        elif year == 2024:
+            binned = build_fixed_color_bins(
+                counts,
+                bins=[0, 30, 60, 995],
+                labels=["1-30", "31-60", "61-995"],
+                count_col=count_col,
+            )
+        else:
+            binned = build_discrete_color_bins(counts, count_col=count_col)
+
+    positive = binned[binned[count_col] > 0].copy()
 
     figure = go.Figure()
 
     if not positive.empty:
-        ordered_positive = positive.sort_values(["people_count", "country"], ascending=[True, True])
+        ordered_positive = positive.sort_values([count_col, "country"], ascending=[True, True])
         bin_labels = list(dict.fromkeys(ordered_positive["color_bin"].tolist()))
         palette = make_blue_palette(len(bin_labels))
 
@@ -268,14 +312,14 @@ def save_year_map(
                 go.Choropleth(
                     locations=bin_rows["country"],
                     locationmode="country names",
-                    z=bin_rows["people_count"],
+                    z=bin_rows[count_col],
                     text=bin_rows["country"],
                     name=label,
                     colorscale=[[0, color], [1, color]],
                     showscale=False,
                     marker_line_color="white",
                     marker_line_width=0.4,
-                    hovertemplate="Country/region: %{location}<br>People: %{z}<extra></extra>",
+                    hovertemplate=f"Country/region: %{{location}}<br>{value_label}: %{{z}}<extra></extra>",
                 )
             )
             figure.add_trace(
@@ -300,7 +344,7 @@ def save_year_map(
                 go.Scattergeo(
                     locations=non_dark_rows["country"],
                     locationmode="country names",
-                    text=non_dark_rows["people_count"].astype(str),
+                    text=non_dark_rows[count_col].astype(str),
                     mode="text",
                     textposition="middle center",
                     textfont=dict(size=label_font_size, color="#1f1f1f"),
@@ -314,7 +358,7 @@ def save_year_map(
                 go.Scattergeo(
                     locations=dark_rows["country"],
                     locationmode="country names",
-                    text=dark_rows["people_count"].astype(str),
+                    text=dark_rows[count_col].astype(str),
                     mode="text",
                     textposition="middle center",
                     textfont=dict(size=label_font_size, color="#ffffff"),
@@ -324,7 +368,7 @@ def save_year_map(
             )
 
     figure.update_layout(
-        title=f"Author distribution in {year}",
+        title=f"{title_prefix} in {year}",
         geo=dict(
             showframe=False,
             showcoastlines=True,
@@ -353,14 +397,19 @@ def save_year_map(
     return html_path, None
 
 
-def save_summary_csv(yearly_counts: dict[int, pd.DataFrame], output_dir: Path) -> Path:
+def save_summary_csv(
+    yearly_counts: dict[int, pd.DataFrame],
+    output_dir: Path,
+    count_col: str,
+    filename: str,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = output_dir / "yearly_country_counts.csv"
+    summary_path = output_dir / filename
     records = []
 
     for year, counts in yearly_counts.items():
         for row in counts.itertuples(index=False):
-            records.append({"year": year, "country": row.country, "people_count": int(row.people_count)})
+            records.append({"year": year, "country": row.country, count_col: int(getattr(row, count_col))})
 
     pd.DataFrame(records).to_csv(summary_path, index=False, encoding="utf-8-sig")
     return summary_path
@@ -372,22 +421,57 @@ def main() -> None:
     df = load_data(input_path)
     print_name_address_summary(df)
 
-    yearly_counts = build_yearly_country_counts(df, TARGET_YEARS)
-    summary_path = save_summary_csv(yearly_counts, output_dir)
-    print(f"Summary CSV written to {summary_path}", flush=True)
+    # Author distribution
+    yearly_author_counts = build_yearly_country_counts(
+        df, TARGET_YEARS, count_col="name", output_col="people_count", dedup_cols=["name", "country"]
+    )
+    author_summary_path = save_summary_csv(
+        yearly_author_counts, output_dir, count_col="people_count", filename="yearly_country_counts.csv"
+    )
+    print(f"Author summary CSV written to {author_summary_path}", flush=True)
 
     for year in TARGET_YEARS:
-        print(f"Rendering year {year} map...", flush=True)
+        print(f"Rendering author map for year {year}...", flush=True)
         html_path, image_path = save_year_map(
-            yearly_counts[year],
+            yearly_author_counts[year],
             year,
             output_dir,
             STATIC_IMAGE_FORMAT,
             False,
+            count_col="people_count",
+            value_label="People",
+            title_prefix="Author distribution",
+            filename_prefix="author_distribution",
         )
-        print(f"Year {year}: {len(yearly_counts[year])} countries/regions -> {html_path}")
+        print(f"Year {year} (authors): {len(yearly_author_counts[year])} countries/regions -> {html_path}")
         if image_path is not None:
-            print(f"Year {year}: static image -> {image_path}")
+            print(f"Year {year} (authors): static image -> {image_path}")
+
+    # Article distribution
+    yearly_article_counts = build_yearly_country_counts(
+        df, TARGET_YEARS, count_col="Article Title", output_col="article_count"
+    )
+    article_summary_path = save_summary_csv(
+        yearly_article_counts, output_dir, count_col="article_count", filename="yearly_country_article_counts.csv"
+    )
+    print(f"Article summary CSV written to {article_summary_path}", flush=True)
+
+    for year in TARGET_YEARS:
+        print(f"Rendering article map for year {year}...", flush=True)
+        html_path, image_path = save_year_map(
+            yearly_article_counts[year],
+            year,
+            output_dir,
+            STATIC_IMAGE_FORMAT,
+            False,
+            count_col="article_count",
+            value_label="Articles",
+            title_prefix="Article distribution",
+            filename_prefix="article_distribution",
+        )
+        print(f"Year {year} (articles): {len(yearly_article_counts[year])} countries/regions -> {html_path}")
+        if image_path is not None:
+            print(f"Year {year} (articles): static image -> {image_path}")
 
 
 if __name__ == "__main__":
