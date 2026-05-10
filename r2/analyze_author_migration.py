@@ -543,10 +543,13 @@ def save_crosscountry_sankey(
         values.append(count)
         hover_labels.append(f"Source: {origin}<br>Destination: {dest}<br>People: {count}")
 
+    sankey_label_font_size = 16
+
     fig = go.Figure(
         data=[
             go.Sankey(
                 arrangement="fixed",
+                textfont=dict(size=sankey_label_font_size),
                 node=dict(
                     pad=14,
                     thickness=32,
